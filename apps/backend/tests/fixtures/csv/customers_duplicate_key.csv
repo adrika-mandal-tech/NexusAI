@@ -1,0 +1,4 @@
+customer_id,name,email,country,segment
+C001,Acme Corp,info@acme.com,DE,enterprise
+C001,Acme Corp Duplicate,info2@acme.com,DE,enterprise
+C002,Globex,hello@globex.com,US,smb

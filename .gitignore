@@ -1,0 +1,63 @@
+# Environment variables & secrets
+.env
+.env.*
+!.env.example
+!.env.*.example
+*.pem
+*.key
+*.crt
+
+# Runtime data, local uploads & database state
+.data/
+apps/backend/.data/
+*.db
+*.sqlite
+*.sqlite3
+dump.rdb
+celerybeat-schedule*
+
+# Large binary test archives
+Test_Files/*.zip
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.venv/
+venv/
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Node / Next.js
+node_modules/
+.next/
+out/
+*.tsbuildinfo
+
+# IDE & agent scratch
+.vscode/
+.idea/
+.claude/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Testing
+.coverage
+htmlcov/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+Test_Files/cuda-samples-13.4/
+Test_Files/

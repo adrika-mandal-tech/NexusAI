@@ -1,0 +1,220 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>NexusAI — Explain</title>
+<style>
+  body { font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif; margin: 0; background: #0b0f19; color: #e6e8ef; }
+  .container { max-width: 1200px; margin: 0 auto; padding: 40px 24px; }
+  h1 { font-size: 32px; margin-bottom: 8px; }
+  .subtitle { color: #9aa3b2; margin-bottom: 40px; }
+  .section { margin-bottom: 56px; }
+  .section h2 { font-size: 22px; margin-bottom: 16px; color: #fff; }
+  .card { background: #111827; border: 1px solid #1f2937; border-radius: 12px; padding: 20px; margin-bottom: 16px; }
+  .mermaid { background: #0b0f19; border-radius: 8px; padding: 12px; overflow: auto; }
+  pre { background: #0b0f19; border-radius: 8px; padding: 12px; overflow: auto; color: #c9d1d9; }
+  table { width: 100%; border-collapse: collapse; }
+  th, td { text-align: left; padding: 10px 8px; border-bottom: 1px solid #1f2937; }
+  th { color: #9aa3b2; font-weight: 500; }
+  .badge { display: inline-block; padding: 2px 8px; border-radius: 999px; background: #111827; border: 1px solid #334155; color: #cbd5e1; font-size: 12px; }
+</style>
+</head>
+<body>
+<div class="container">
+  <h1>NexusAI — How It Works</h1>
+  <p class="subtitle">End-to-end RAG pipeline, workflows, and component interactions.</p>
+
+  <div class="section">
+    <h2>1. High-Level Pipeline</h2>
+    <div class="card">
+      <div class="mermaid">
+graph LR
+    A[User uploads file] --> B[Parse text]
+    B --> C[Chunk ~500 tokens / overlap 100]
+    C --> D[BGE-M3 embeddings]
+    D --> E[Qdrant vector store]
+    D --> F[Neo4j graph entities]
+    G[User asks question] --> H[Embed query with BGE-M3]
+    H --> I[Retrieve top-k from Qdrant]
+    I --> J[Fetch graph context from Neo4j]
+    J --> K[Build grounded prompt]
+    K --> L[LLM: Gemini / Groq]
+    L --> M[Answer + citations]
+      </div>
+    </div>
+  </div>
+
+  <div class="section">
+    <h2>2. Ingestion Workflow</h2>
+    <div class="card">
+      <div class="mermaid">
+sequenceDiagram
+    actor User
+    participant UI as Frontend
+    participant API as FastAPI
+    participant Pipe as Pipeline
+    participant Emb as BGE-M3
+    participant Q as Qdrant
+    participant N as Neo4j
+
+    User->>UI: Upload file in Workspace
+    UI->>API: POST /api/v1/knowledge/upload
+    API->>Pipe: ingest_file()
+    Pipe->>Pipe: extract text
+    Pipe->>Pipe: chunk text
+    Pipe->>Emb: embed_texts(chunks)
+    Emb-->>Pipe: vectors
+    Pipe->>Q: upsert vectors
+    Pipe->>N: create nodes/edges
+    Pipe-->>API: source_id, chunks
+    API-->>UI: {source_id, status}
+    UI-->>User: show ready + file size limits
+      </div>
+    </div>
+  </div>
+
+  <div class="section">
+    <h2>3. Retrieval / Chat Workflow</h2>
+    <div class="card">
+      <div class="mermaid">
+sequenceDiagram
+    actor User
+    participant UI as Frontend
+    participant API as FastAPI
+    participant Emb as BGE-M3
+    participant Q as Qdrant
+    participant N as Neo4j
+    participant LLM as Gemini/Groq
+
+    User->>UI: Send message
+    UI->>API: POST /api/v1/knowledge/chat
+    API->>Emb: embed_query(message)
+    Emb-->>API: query vector
+    API->>Q: query_points()
+    Q-->>API: top-k chunks
+    API->>N: get_graph()
+    N-->>API: graph context
+    API->>LLM: generate with context
+    LLM-->>API: answer
+    API-->>UI: {role, content, sources}
+    UI-->>User: render answer + citations
+      </div>
+    </div>
+  </div>
+
+  <div class="section">
+    <h2>4. Multi-Key & Model Routing</h2>
+    <div class="card">
+      <div class="mermaid">
+graph TD
+    A[Incoming request] --> B{provider param?}
+    B -->|gemini| C[Use Gemini]
+    B -->|groq| D[Use Groq]
+    B -->|auto| E{GROQ_API_KEYS set?}
+    E -->|yes| D
+    E -->|no| F{GOOGLE_API_KEYS set?}
+    F -->|yes| C
+    F -->|no| G[Return no-keys message]
+    C --> H[Rotate Gemini keys]
+    C --> I[Rotate Gemini models]
+    D --> J[Rotate Groq keys]
+    D --> K[Rotate Groq models]
+    H --> L[Generate answer]
+    I --> L
+    J --> L
+    K --> L
+      </div>
+    </div>
+  </div>
+
+  <div class="section">
+    <h2>5. Component Inventory</h2>
+    <div class="card">
+      <table>
+        <tr><th>Component</th><th>Role</th><th>Key Files</th></tr>
+        <tr>
+          <td><span class="badge">Frontend</span></td>
+          <td>Next.js dashboard, Workspace upload, Chat UI</td>
+          <td>apps/frontend/app/(dashboard)/work/page.tsx, apps/frontend/app/(dashboard)/chat/page.tsx</td>
+        </tr>
+        <tr>
+          <td><span class="badge">Backend</span></td>
+          <td>FastAPI app, routers, CORS, request ID</td>
+          <td>apps/backend/src/nexusai/main.py</td>
+        </tr>
+        <tr>
+          <td><span class="badge">Config</span></td>
+          <td>pydantic-settings + NEXUS_* alias resolution</td>
+          <td>apps/backend/src/nexusai/core/config.py</td>
+        </tr>
+        <tr>
+          <td><span class="badge">Pipeline</span></td>
+          <td>ingest, chunk, embed, retrieve, generate</td>
+          <td>apps/backend/src/nexusai/application/pipeline.py</td>
+        </tr>
+        <tr>
+          <td><span class="badge">Embeddings</span></td>
+          <td>BGE-M3 via sentence-transformers</td>
+          <td>apps/backend/src/nexusai/infrastructure/clients/embedding_client.py</td>
+        </tr>
+        <tr>
+          <td><span class="badge">Qdrant</span></td>
+          <td>Vector search / upsert / delete</td>
+          <td>apps/backend/src/nexusai/infrastructure/clients/qdrant_client.py</td>
+        </tr>
+        <tr>
+          <td><span class="badge">Neo4j</span></td>
+          <td>Graph entities and relationships</td>
+          <td>apps/backend/src/nexusai/infrastructure/clients/neo4j_client.py</td>
+        </tr>
+        <tr>
+          <td><span class="badge">LLM</span></td>
+          <td>Gemini + Groq with key/model rotation</td>
+          <td>apps/backend/src/nexusai/application/pipeline.py</td>
+        </tr>
+        <tr>
+          <td><span class="badge">Observability</span></td>
+          <td>LangSmith tracing config</td>
+          <td>apps/backend/src/nexusai/core/config.py, apps/backend/src/nexusai/application/pipeline.py</td>
+        </tr>
+      </table>
+    </div>
+  </div>
+
+  <div class="section">
+    <h2>6. File Size Limits</h2>
+    <div class="card">
+      <table>
+        <tr><th>File Type</th><th>Max Size</th></tr>
+        <tr><td>PDF</td><td>100 MB</td></tr>
+        <tr><td>DOC / DOCX</td><td>50 MB</td></tr>
+        <tr><td>CSV / XLSX</td><td>100 MB</td></tr>
+        <tr><td>TXT / MD / JSON</td><td>10 MB</td></tr>
+        <tr><td>EXE / MSI</td><td>200 MB</td></tr>
+      </table>
+    </div>
+  </div>
+
+  <div class="section">
+    <h2>7. API Reference</h2>
+    <div class="card">
+      <table>
+        <tr><th>Method</th><th>Path</th><th>Description</th></tr>
+        <tr><td>GET</td><td>/health</td><td>Health check</td></tr>
+        <tr><td>GET</td><td>/api/v1/knowledge/models</td><td>List available LLM models</td></tr>
+        <tr><td>POST</td><td>/api/v1/knowledge/upload</td><td>Upload file and ingest</td></tr>
+        <tr><td>GET</td><td>/api/v1/knowledge/sources</td><td>List sources</td></tr>
+        <tr><td>GET</td><td>/api/v1/knowledge/search?q=...&provider=...&model=...</td><td>RAG search</td></tr>
+        <tr><td>POST</td><td>/api/v1/knowledge/chat</td><td>RAG chat with optional provider/model</td></tr>
+        <tr><td>GET</td><td>/api/v1/knowledge/graph</td><td>Knowledge graph data</td></tr>
+      </table>
+    </div>
+  </div>
+</div>
+<script type="module">
+  import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.esm.min.mjs';
+  mermaid.initialize({ startOnLoad: true, theme: 'dark' });
+</script>
+</body>
+</html>

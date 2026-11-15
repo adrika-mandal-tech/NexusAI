@@ -1,0 +1,5 @@
+customer_id,name,country,segment,created_at
+C001,Acme Corp,DE,enterprise,2024-01-15
+C002,Globex,US,smb,not-a-date
+C003,,DE,,2024-02-05
+,NoIdentity,UK,enterprise,2024-02-11

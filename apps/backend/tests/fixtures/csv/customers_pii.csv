@@ -1,0 +1,4 @@
+customer_id,name,email,ssn,country
+C001,Acme Corp,info@acme.com,111-22-3333,DE
+C002,Globex,hello@globex.com,222-33-4444,US
+C003,Initech,contact@initech.com,333-44-5555,DE

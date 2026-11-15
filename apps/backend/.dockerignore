@@ -1,0 +1,36 @@
+# Environment & secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.crt
+
+# Runtime data & DB files
+.data
+uploads
+*.db
+*.sqlite
+*.sqlite3
+dump.rdb
+celerybeat-schedule*
+
+# Python
+__pycache__
+*.py[cod]
+*$py.class
+.venv
+venv
+*.egg-info
+dist
+build
+
+# Testing & tool caches
+tests
+.coverage
+htmlcov
+.pytest_cache
+.mypy_cache
+.ruff_cache
+.DS_Store
+*.log

@@ -1,0 +1,58 @@
+# Git
+.git
+.gitignore
+
+# Environment & secrets
+.env
+.env.*
+!.env.example
+!.env.*.example
+*.pem
+*.key
+*.crt
+
+# Runtime data & test fixtures
+.data
+apps/backend/.data
+Test_Files
+*.db
+*.sqlite
+*.sqlite3
+
+# Python
+__pycache__
+*.py[cod]
+.venv
+venv
+*.egg-info
+dist
+build
+
+# Node / Next.js
+node_modules
+.next
+out
+*.tsbuildinfo
+
+# IDE & agent scratch
+.vscode
+.idea
+.claude
+
+# OS & logs
+.DS_Store
+Thumbs.db
+*.log
+
+# Testing caches
+.coverage
+htmlcov
+.pytest_cache
+.mypy_cache
+.ruff_cache
+
+# Docs & CI
+docs/
+*.md
+!README.md
+.github/

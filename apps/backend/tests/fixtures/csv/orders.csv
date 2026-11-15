@@ -1,0 +1,6 @@
+order_id,customer_id,seller_id,order_date,total_amount,status
+O1001,C001,S001,2024-01-20,1250.50,shipped
+O1002,C002,S002,2024-01-22,340.00,pending
+O1003,C001,S001,2024-02-01,99.99,shipped
+O1004,C003,S003,2024-02-14,4200.75,pending
+O1005,C004,S001,2024-03-02,15.25,shipped

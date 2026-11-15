@@ -1,0 +1,6 @@
+customer_id,name,email,country,segment,created_at
+C001,Acme Corp,info@acme.com,DE,enterprise,2024-01-15
+C002,Globex,hello@globex.com,US,smb,2024-01-22
+C003,Initech,contact@initech.com,DE,enterprise,2024-02-05
+C004,Umbrella,ops@umbrella.com,UK,enterprise,2024-02-11
+C005,Stark Industries,hello@stark.com,US,smb,2024-03-01
