@@ -51,8 +51,10 @@ def setup_logging() -> None:
     root_logger.addHandler(handler)
     root_logger.setLevel(getattr(logging, settings.LOG_LEVEL.upper(), logging.INFO))
 
-    # Quieten noisy libraries
+    # Quieten noisy third-party loggers and avoid logging request query params (e.g. API keys)
     logging.getLogger("uvicorn.access").setLevel(logging.WARNING)
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("httpcore").setLevel(logging.WARNING)
 
 
 def get_logger(name: str) -> logging.Logger:

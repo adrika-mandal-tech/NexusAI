@@ -117,9 +117,7 @@ async def upload_csvs(
                 )
             )
         except CsvUploadError as exc:
-            raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)
-            ) from exc
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
 
     service = _get_service()
     try:
@@ -127,9 +125,7 @@ async def upload_csvs(
             stored, include_pii=include_pii, created_by=str(user_id)
         )
     except ValueError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)
-        ) from exc
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
     return {
         "proposal_id": str(proposal.proposal_id),
@@ -191,9 +187,7 @@ async def update_proposal(
     try:
         updated = await service.update_proposal(proposal)
     except ValueError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)
-        ) from exc
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     return updated.model_dump(mode="json")
 
 

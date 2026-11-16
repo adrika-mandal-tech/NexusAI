@@ -184,3 +184,99 @@ async def test_live_eval_metrics_pct_document_scoped_overview_and_cypher_console
     finally:
         await client.delete(f"/api/v1/documents/{doc_id}")
 
+
+@pytest.mark.asyncio
+async def test_unscoped_conversational_and_general_chat_and_gemini_failover() -> None:
+    """Verify general/conversational chat reaches the LLM without false abstention and Gemini omits thinkingConfig on 3.5-flash-lite."""
+    from types import SimpleNamespace
+
+    from nexusai.application.agent.assistant import NexusSingleAgentAssistant
+    from nexusai.infrastructure.llm.provider import GeminiAsyncClient, LLMProviderRegistry, OpenLMClient
+    from nexusai.infrastructure.repositories import InMemoryKnowledgeRepository
+
+    # 1. Verify GeminiAsyncClient omits thinkingConfig on gemini-3.5-flash-lite & fast-rotates on 400
+    seen_models: list[str] = []
+    seen_payloads: list[dict] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        url_str = str(request.url)
+        import json as _json
+
+        payload = _json.loads(request.content.decode("utf-8"))
+        seen_payloads.append(payload)
+        if "gemini-3.5-flash-lite" in url_str:
+            seen_models.append("gemini-3.5-flash-lite")
+            return httpx.Response(400, json={"error": {"code": 400, "status": "INVALID_ARGUMENT"}})
+        seen_models.append("gemini-3.1-flash-lite")
+        return httpx.Response(
+            200,
+            json={"candidates": [{"content": {"parts": [{"text": "Qubits are quantum bits."}]}}]},
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as hc:
+        g_client = GeminiAsyncClient(api_keys=["k1", "k2"], model_name="gemini-3.5-flash-lite", max_retries=3, http_client=hc)
+        p_lite = g_client._build_payload("hi", None, 0.1, None, active_model="gemini-3.5-flash-lite")
+        assert "thinkingConfig" not in p_lite["generationConfig"]
+        ans = await g_client.generate("Explain qubits")
+        assert "Qubits" in ans or "quantum bits" in ans
+
+    # 2. Verify NexusSingleAgentAssistant answers general/conversational queries when KB has 0 chunks
+    class EmptyRetriever:
+        async def retrieve(self, **kwargs):  # type: ignore[no-untyped-def]
+            return SimpleNamespace(
+                query=kwargs.get("query", ""),
+                mode="hybrid",
+                fusion_strategy="rrf",
+                reranked=False,
+                chunks=[],
+                citations=[],
+                web_results=[],
+                graph_entities=[],
+                graph_status="empty",
+                web_status="skipped",
+                assembled_context="",
+                has_sufficient_evidence=False,
+                diagnostics={"latency_ms": {}, "dense_candidates": 0, "sparse_candidates": 0, "graph_candidates": 0, "final_selected_chunks": 0},
+            )
+
+    class StubLLM:
+        model_name = "stub-general-model"
+
+        async def generate(self, prompt: str, system_prompt: str | None = None, temperature: float = 0.1) -> str:
+            return "Hello! Quantum computing uses qubits that leverage superposition and entanglement."
+
+        async def stream(self, prompt: str, system_prompt: str | None = None, temperature: float = 0.1):
+            yield "Hello! Quantum computing uses qubits."
+
+    assistant = NexusSingleAgentAssistant(
+        retriever=EmptyRetriever(),  # type: ignore[arg-type]
+        llm_registry=LLMProviderRegistry(
+            gemini=GeminiAsyncClient(api_keys=[]),
+            openlm=OpenLMClient(base_url=""),
+            groq=OpenLMClient(base_url="", provider_label="groq"),
+        ),
+        knowledge_repo=InMemoryKnowledgeRepository(),
+    )
+    uid = uuid.UUID("00000000-0000-0000-0000-000000000000")
+
+    gen_turn = await assistant.answer(
+        query="what is quantum computing?",
+        user_id=uid,
+        llm_override=StubLLM(),  # type: ignore[arg-type]
+    )
+    assert "could not find supporting evidence" not in gen_turn.answer.lower()
+    assert "qubits" in gen_turn.answer.lower()
+    assert gen_turn.diagnostics["eval_metrics"]["abstained"] is False
+    assert gen_turn.diagnostics["eval_metrics"]["hallucination_rate_pct"] == 0.0
+
+    # 3. Document-scoped out-of-domain query STILL deterministically abstains
+    scoped_turn = await assistant.answer(
+        query="What was the 2198 Jovian pressure?",
+        user_id=uid,
+        filter_metadata={"document_id": str(uuid.uuid4())},
+        llm_override=StubLLM(),  # type: ignore[arg-type]
+    )
+    assert "could not find supporting evidence" in scoped_turn.answer.lower()
+    assert scoped_turn.diagnostics["eval_metrics"]["abstained"] is True
+    assert scoped_turn.diagnostics["eval_metrics"]["hallucination_rate_pct"] == 0.0
+

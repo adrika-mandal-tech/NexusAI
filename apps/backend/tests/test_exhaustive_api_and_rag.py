@@ -319,7 +319,7 @@ async def test_multiformat_ingestion_dedup_reindex_all_search_modes_tools_and_ch
         assert s_web.status_code == 200
         assert s_web.json()["status"] in ("unconfigured", "ok")
 
-        # 7. Test ALL 7 Single-Agent Assistant LangChain StructuredTools directly
+        # 7. Test ALL Single-Agent Assistant LangChain StructuredTools directly
         assistant = get_assistant()
         tools_by_name = {t.name: t for t in assistant.tools}
         expected_tools = {
@@ -330,6 +330,7 @@ async def test_multiformat_ingestion_dedup_reindex_all_search_modes_tools_and_ch
             "web_search",
             "document_summary",
             "source_lookup",
+            "dataset_analytics_profiler",
         }
         assert set(tools_by_name.keys()) == expected_tools
 

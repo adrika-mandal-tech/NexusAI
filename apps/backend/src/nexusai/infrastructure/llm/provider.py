@@ -6,6 +6,7 @@ import asyncio
 import json
 import os
 import re
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from typing import Any, AsyncGenerator
 
@@ -19,6 +20,12 @@ from nexusai.domain.ports.llm_port import LLMPort
 logger = get_logger(__name__)
 
 _RETRYABLE_STATUS_CODES = frozenset({429, 500, 502, 503, 504})
+_SECRET_QUERY_PARAM_RE = re.compile(r"([?&](?:key|api_key|token)=)[^&\s'\"]+", re.IGNORECASE)
+
+
+def _redact_secrets(text: object) -> str:
+    """Redact API keys from URL/HTTP error strings before logging."""
+    return _SECRET_QUERY_PARAM_RE.sub(r"\1***", str(text or ""))
 
 
 class LLMProviderUnconfiguredError(RuntimeError):
@@ -95,8 +102,8 @@ class GeminiAsyncClient(LLMPort):
         gen_cfg: dict[str, Any] = {"temperature": temperature}
         if max_tokens is not None:
             gen_cfg["maxOutputTokens"] = max_tokens
-        # Disable internal hidden thought budget on Gemini 2.5/3.x Flash models for sub-second grounded RAG latency
-        if any(tag in active_model for tag in ("2.5-flash", "3-flash", "3.1-flash", "3.5-flash")):
+        # Disable internal hidden thought budget only on Gemini 2.5 Flash models (3.5-flash-lite rejects thinkingBudget with 400 INVALID_ARGUMENT)
+        if "2.5-flash" in active_model or active_model.startswith("gemini-3-flash"):
             gen_cfg["thinkingConfig"] = {"thinkingBudget": 0}
         payload: dict[str, Any] = {
             "contents": [{"role": "user", "parts": [{"text": prompt}]}],
@@ -114,6 +121,15 @@ class GeminiAsyncClient(LLMPort):
                 ordered.append(fm)
         return ordered
 
+    @asynccontextmanager
+    async def _borrow_client(self) -> AsyncGenerator[httpx.AsyncClient, None]:
+        """Yield the injected HTTP client or a fresh ephemeral client for the request."""
+        if self._http_client is not None:
+            yield self._http_client
+        else:
+            async with httpx.AsyncClient(timeout=self._timeout) as client:
+                yield client
+
     @traced_step(name="gemini_generate", run_type="llm")
     async def generate(
         self,
@@ -123,36 +139,49 @@ class GeminiAsyncClient(LLMPort):
         max_tokens: int | None = None,
         model: str | None = None,
     ) -> str:
-        models_to_try = self._candidate_models(model) if self._http_client is None else [(model or self._model_name).strip()]
+        models_to_try = self._candidate_models(model)
         last_exc: Exception | None = None
 
         for active_model in models_to_try:
             payload = self._build_payload(prompt, system_prompt, temperature, max_tokens, active_model=active_model)
-            for attempt in range(self._max_retries):
+            stripped_thinking_retry = False
+            attempt = 0
+            while attempt < self._max_retries:
                 api_key = self._next_key()
                 url = f"{self.BASE_URL}/{active_model}:generateContent"
                 try:
-                    if self._http_client is not None:
-                        resp = await self._http_client.post(
+                    async with self._borrow_client() as client:
+                        resp = await client.post(
                             url,
                             params={"key": api_key},
                             json=payload,
                             timeout=self._timeout,
                         )
-                    else:
-                        async with httpx.AsyncClient(timeout=self._timeout) as client:
-                            resp = await client.post(url, params={"key": api_key}, json=payload)
+
+                    if resp.status_code == 400:
+                        gen_cfg = payload.get("generationConfig")
+                        if not stripped_thinking_retry and isinstance(gen_cfg, dict) and "thinkingConfig" in gen_cfg:
+                            gen_cfg.pop("thinkingConfig", None)
+                            stripped_thinking_retry = True
+                            continue
+                        last_exc = RuntimeError(f"Gemini model {active_model} returned 400 Bad Request")
+                        logger.warning("Gemini model '%s' returned 400; rotating to next active Gemini model", active_model)
+                        break
 
                     if resp.status_code == 404 and len(models_to_try) > 1:
                         logger.warning("Gemini model '%s' returned 404; rotating to next active Gemini model", active_model)
                         last_exc = RuntimeError(f"Gemini model {active_model} returned 404")
                         break
 
-                    if resp.status_code in _RETRYABLE_STATUS_CODES and attempt + 1 < self._max_retries:
-                        backoff = min(4.0, 0.35 * (2**attempt))
-                        logger.warning("Gemini HTTP %d on attempt %d; rotating key & retrying in %.2fs", resp.status_code, attempt + 1, backoff)
-                        await asyncio.sleep(backoff)
-                        continue
+                    if resp.status_code in _RETRYABLE_STATUS_CODES:
+                        last_exc = RuntimeError(f"Gemini model {active_model} returned HTTP {resp.status_code}")
+                        if attempt + 1 < self._max_retries:
+                            backoff = min(2.0, 0.25 * (2**attempt))
+                            logger.warning("Gemini HTTP %d on attempt %d; rotating key & retrying in %.2fs", resp.status_code, attempt + 1, backoff)
+                            await asyncio.sleep(backoff)
+                            attempt += 1
+                            continue
+                        break
 
                     resp.raise_for_status()
                     data = resp.json()
@@ -167,18 +196,18 @@ class GeminiAsyncClient(LLMPort):
                     text = self._extract_candidate_text(data)
                     if text:
                         return text
+                    break
                 except LLMProviderUnconfiguredError:
                     raise
                 except Exception as exc:
-                    last_exc = exc
-                    if attempt + 1 < self._max_retries:
-                        await asyncio.sleep(min(2.5, 0.3 * (2**attempt)))
+                    last_exc = RuntimeError(_redact_secrets(exc))
+                    attempt += 1
+                    if attempt < self._max_retries:
+                        await asyncio.sleep(min(1.5, 0.25 * (2**attempt)))
                         continue
-                    if self._http_client is not None:
-                        raise
 
         if last_exc is not None:
-            logger.error("Gemini generation failed across candidate models: %s", last_exc)
+            logger.error("Gemini generation failed across candidate models: %s", _redact_secrets(last_exc))
             raise last_exc
         return "The model returned an empty response."
 
@@ -191,47 +220,59 @@ class GeminiAsyncClient(LLMPort):
         max_tokens: int | None = None,
         model: str | None = None,
     ) -> AsyncGenerator[str, None]:
-        models_to_try = self._candidate_models(model) if self._http_client is None else [(model or self._model_name).strip()]
+        models_to_try = self._candidate_models(model)
         last_exc: Exception | None = None
 
         for active_model in models_to_try:
-            api_key = self._next_key()
             payload = self._build_payload(prompt, system_prompt, temperature, max_tokens, active_model=active_model)
             url = f"{self.BASE_URL}/{active_model}:streamGenerateContent"
+            max_stream_attempts = min(2, max(1, len(self._api_keys)))
+            stripped_thinking_retry = False
+            attempt = 0
 
-            if self._http_client is not None:
-                async with self._http_client.stream(
-                    "POST",
-                    url,
-                    params={"alt": "sse", "key": api_key},
-                    json=payload,
-                    timeout=self._timeout,
-                ) as resp:
-                    resp.raise_for_status()
-                    async for delta in self._iter_sse_lines(resp, active_model):
-                        yield delta
-                return
-
-            try:
-                async with httpx.AsyncClient(timeout=self._timeout) as client:
-                    async with client.stream(
-                        "POST",
-                        url,
-                        params={"alt": "sse", "key": api_key},
-                        json=payload,
-                    ) as resp:
-                        if resp.status_code == 404 and len(models_to_try) > 1:
-                            logger.warning("Gemini stream model '%s' returned 404; rotating to next model", active_model)
-                            last_exc = RuntimeError(f"Gemini stream model {active_model} returned 404")
-                            continue
-                        resp.raise_for_status()
-                        async for delta in self._iter_sse_lines(resp, active_model):
-                            yield delta
-                        return
-            except Exception as exc:
-                last_exc = exc
-                logger.warning("Gemini stream on '%s' failed (%s); trying next fallback model", active_model, exc)
-                continue
+            while attempt < max_stream_attempts:
+                api_key = self._next_key()
+                try:
+                    async with self._borrow_client() as client:
+                        async with client.stream(
+                            "POST",
+                            url,
+                            params={"alt": "sse", "key": api_key},
+                            json=payload,
+                            timeout=self._timeout,
+                        ) as resp:
+                            if resp.status_code == 400:
+                                gen_cfg = payload.get("generationConfig")
+                                if not stripped_thinking_retry and isinstance(gen_cfg, dict) and "thinkingConfig" in gen_cfg:
+                                    gen_cfg.pop("thinkingConfig", None)
+                                    stripped_thinking_retry = True
+                                    continue
+                                logger.warning("Gemini stream model '%s' returned 400; rotating to next model", active_model)
+                                last_exc = RuntimeError(f"Gemini stream model {active_model} returned 400")
+                                break
+                            if resp.status_code == 404 and len(models_to_try) > 1:
+                                logger.warning("Gemini stream model '%s' returned 404; rotating to next model", active_model)
+                                last_exc = RuntimeError(f"Gemini stream model {active_model} returned 404")
+                                break
+                            if resp.status_code in _RETRYABLE_STATUS_CODES:
+                                last_exc = RuntimeError(f"Gemini stream model {active_model} returned HTTP {resp.status_code}")
+                                attempt += 1
+                                if attempt < max_stream_attempts:
+                                    await asyncio.sleep(0.25 * attempt)
+                                    continue
+                                break
+                            resp.raise_for_status()
+                            async for delta in self._iter_sse_lines(resp, active_model):
+                                yield delta
+                            return
+                except Exception as exc:
+                    last_exc = RuntimeError(_redact_secrets(exc))
+                    logger.warning("Gemini stream on '%s' failed (%s); trying next fallback", active_model, _redact_secrets(exc))
+                    attempt += 1
+                    if attempt < max_stream_attempts:
+                        await asyncio.sleep(0.25 * attempt)
+                        continue
+                    break
 
         if last_exc is not None:
             raise last_exc

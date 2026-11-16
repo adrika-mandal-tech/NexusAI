@@ -95,6 +95,11 @@ _GRAPH_HINT_RE = re.compile(
     r"\b(?:relationship|connected\s+to|supplied\s+by|placed\s+by|orders?\s+for|customers?\s+in|suppliers?\s+of|graph|neo4j|entity|entities)\b",
     re.IGNORECASE,
 )
+_CONVERSATIONAL_GREETING_RE = re.compile(
+    r"^\s*(?:hi+|hello+|hey+|good\s+(?:morning|afternoon|evening)|how\s+are\s+you|who\s+are\s+you|"
+    r"what\s+can\s+you\s+do|thanks?(?:\s+you)?|what(?:'?s|\s+is)\s+(?:up|wrong)|ok(?:ay)?)[!.?\s]*$",
+    re.IGNORECASE,
+)
 
 
 def tokenize_lexical(text: str) -> list[str]:
@@ -485,7 +490,11 @@ class HybridRetrievalEngine:
             analysis = understand_query(query, requested_mode=mode, include_web=include_web)
         effective_mode = analysis.recommended_mode
 
-        if not analysis.normalized_query:
+        if not analysis.normalized_query or (
+            not include_web
+            and not self._extract_scoped_doc_ids(filter_metadata)
+            and _CONVERSATIONAL_GREETING_RE.match(analysis.normalized_query)
+        ):
             return HybridRetrievalResult(
                 request_id=req_id,
                 query=query,
@@ -501,7 +510,10 @@ class HybridRetrievalEngine:
                 web_status="skipped",
                 assembled_context="",
                 has_sufficient_evidence=False,
-                diagnostics={"latency_ms": latencies, "reason": "empty_query"},
+                diagnostics={
+                    "latency_ms": latencies,
+                    "reason": "empty_query" if not analysis.normalized_query else "conversational_greeting",
+                },
             )
 
         run_dense = effective_mode in ("hybrid", "dense")

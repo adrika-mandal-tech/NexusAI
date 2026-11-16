@@ -150,7 +150,7 @@ async def process_single_upload(
     except FileValidationError as exc:
         staged_path.unlink(missing_ok=True)
         raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status_code=422,
             detail=str(exc),
         ) from exc
 
@@ -307,8 +307,15 @@ async def delete_source(
     if not source or source.user_id != uuid.UUID(user_id):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Source not found")
 
-    await get_vector_store().delete_document_chunks(source_id)
-    await get_graph_store().delete_document_graph(source_id)
+    try:
+        await get_vector_store().delete_document_chunks(source_id)
+    except Exception as exc:
+        logger.warning("Qdrant cleanup skipped during delete for %s: %s", source_id, exc)
+
+    try:
+        await get_graph_store().delete_document_graph(source_id)
+    except Exception as exc:
+        logger.warning("Neo4j cleanup skipped during delete for %s: %s", source_id, exc)
 
     stored_path = (source.metadata or {}).get("stored_path")
     if stored_path:

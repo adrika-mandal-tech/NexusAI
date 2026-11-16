@@ -52,6 +52,11 @@ from nexusai.infrastructure.llm.provider import (
 logger = get_logger(__name__)
 
 _CITATION_TAG_RE = re.compile(r"\[(KB-\d+|WEB-\d+)\]")
+_CONVERSATIONAL_QUERY_RE = re.compile(
+    r"^\s*(?:hi+|hello+|hey+|good\s+(?:morning|afternoon|evening)|how\s+are\s+you|who\s+are\s+you|"
+    r"what\s+can\s+you\s+do|thanks?(?:\s+you)?|what'?s\s+(?:up|wrong)|ok(?:ay)?|help)\s*[!?.]*\s*$",
+    re.IGNORECASE,
+)
 
 GROUNDED_SYSTEM_TEMPLATE = """You are NexusAI, an expert AI assistant, enterprise software architect, and precision knowledge analyst.
 Your mission is to provide thorough, comprehensive, and highly detailed answers to clarify all relevant doubts of the user.
@@ -59,15 +64,15 @@ Your mission is to provide thorough, comprehensive, and highly detailed answers 
 Key instructions:
 1. When retrieved evidence from documents or knowledge base is provided:
    Provide an in-depth, structured, and informative answer addressing the user's specific questions and technical doubts completely.
-   Ground factual claims in the retrieved chunks and cite them inline using [KB-1], [KB-2], etc.
-   Provide rich explanations, context, architecture concepts, and actionable insights.
+   Ground document-based claims in the retrieved chunks and cite them inline using [KB-1], [KB-2], etc.
+   If the user asks an additional general or historical sub-question not covered in the retrieved chunks, you may answer that general part from verified expertise without attaching fake [KB-n] tags.
 2. When dataset or spreadsheet statistical profile context is provided:
    Provide exhaustive mathematical and analytical detail using the exact descriptive statistics (counts, means, std, min/max, percentiles), categorical distributions, and trend numbers.
    Highlight period-over-period growth rates, correlation relationships, data quality (missing values/duplicates), and actionable business recommendations.
-3. When no specific private knowledge chunks match or evidence is sparse:
-   Thoroughly answer the user's doubt, query, or conceptual topic using comprehensive technical knowledge.
-   Explain the underlying mechanics, best practices, and practical guidance in detail.
-   Do not invent fake [KB-n] tags if no private documents were cited.
+3. Conversational, General-Knowledge, & Unverifiable Queries:
+   - Never fabricate or guess `[KB-n]` or `[WEB-n]` citations when no matching document/web source supports that statement.
+   - If no private documents match AND the user asks a conversational greeting, clarification, troubleshooting question, or general conceptual/educational question, respond naturally and helpfully using your general knowledge and conversation history.
+   - ONLY if the user asks for private/proprietary document contents, internal metrics, or unverifiable fictional/future records that are absent from the indexed knowledge base, explicitly state: "I could not find supporting evidence in the indexed knowledge base for this question." rather than inventing facts or numbers.
 4. Formatting Rules:
    Write in clear, structured, natural prose with rich paragraphs.
    Do NOT use special markdown symbols such as hash headings (###), bold asterisks (**), italics, bullet asterisks (*), or horizontal dividers (---).
@@ -292,6 +297,55 @@ class NexusSingleAgentAssistant:
 
         return "\n".join(lines) + "\n", retrieval_query
 
+    @staticmethod
+    def _has_document_scope(filter_metadata: dict[str, Any] | None) -> bool:
+        if not filter_metadata:
+            return False
+        return any(
+            bool(filter_metadata.get(k))
+            for k in ("document_id", "source_id", "document_ids", "source_ids")
+        )
+
+    @classmethod
+    def _prepare_generation_context(
+        cls,
+        query: str,
+        retrieval: HybridRetrievalResult,
+        filter_metadata: dict[str, Any] | None = None,
+        has_llm: bool = True,
+    ) -> tuple[str | None, str | None]:
+        """Assemble grounded context or return deterministic abstention for ungrounded scoped/offline queries."""
+        dataset_profile = ""
+        try:
+            dataset_profile = get_dataset_profiler().find_and_profile_relevant_datasets(query) or ""
+        except Exception as prof_err:
+            logger.debug("Dataset profiling pass notice: %s", prof_err)
+
+        is_conversational = bool(_CONVERSATIONAL_QUERY_RE.match(query or ""))
+        if not retrieval.has_sufficient_evidence and not dataset_profile:
+            if not has_llm or (cls._has_document_scope(filter_metadata) and not is_conversational):
+                return (
+                    None,
+                    "I could not find supporting evidence in the indexed knowledge base for this question. "
+                    "Please upload relevant documents or broaden your search query.",
+                )
+            return (
+                "No private indexed document chunks matched this query. Answer naturally using conversation history "
+                "and verified general knowledge if this is a greeting or general conceptual question (with no fake "
+                "[KB-n] citations). If the question requests specific private records or unverifiable fictional/future "
+                "telemetry, state clearly that you could not find supporting evidence in the indexed knowledge base.",
+                None,
+            )
+
+        context_to_use = (
+            retrieval.assembled_context
+            if retrieval.has_sufficient_evidence
+            else "No unstructured document chunks retrieved; use the verified dataset analytics profile below."
+        )
+        if dataset_profile:
+            context_to_use = f"{context_to_use}\n\n{dataset_profile}"
+        return context_to_use, None
+
     @traced_step(name="nexus_single_agent_answer", run_type="chain")
     async def answer(
         self,
@@ -337,7 +391,18 @@ class NexusSingleAgentAssistant:
         model_used = model or getattr(resolved_llm, "model_name", "extractive-grounded-v1")
         had_llm_error = False
 
-        if not candidates:
+        context_to_use, abstain_msg = self._prepare_generation_context(
+            query,
+            retrieval,
+            filter_metadata=filter_metadata,
+            has_llm=bool(candidates),
+        )
+
+        if abstain_msg is not None:
+            cleaned_answer, val_report = validate_and_clean_citations(abstain_msg, retrieval.citations)
+            provider_used = "grounded_abstention"
+            model_used = "grounded-abstention-v1"
+        elif not candidates:
             with StepTimer(latencies, "llm_ms"):
                 raw_answer = synthesize_extractive_grounded_answer(
                     query=query,
@@ -349,21 +414,9 @@ class NexusSingleAgentAssistant:
             provider_used = "extractive_fallback"
             model_used = "extractive-grounded-v1"
         else:
-            context_to_use = (
-                retrieval.assembled_context
-                if retrieval.has_sufficient_evidence
-                else "No matching private workspace documents found for this query. Provide a comprehensive, detailed, and highly clear technical explanation answering the user's doubt and question directly."
-            )
-            # Enrich context with high-density dataset statistical profiles if query or retrieved evidence touches tabular data
-            try:
-                dataset_profile = get_dataset_profiler().find_and_profile_relevant_datasets(query)
-                if dataset_profile:
-                    context_to_use = f"{context_to_use}\n\n{dataset_profile}"
-            except Exception as prof_err:
-                logger.debug("Dataset profiling pass notice: %s", prof_err)
             formatted_msgs = GROUNDED_PROMPT.format_messages(
                 conversation_history_block=history_block,
-                assembled_context=context_to_use,
+                assembled_context=context_to_use or "",
                 question=query,
             )
             sys_text = str(formatted_msgs[0].content)
@@ -415,7 +468,7 @@ class NexusSingleAgentAssistant:
                             else "degrading to extractive grounded answer",
                         )
 
-            if raw_answer_out is not None:
+            if raw_answer_out is not None and str(raw_answer_out).strip():
                 cleaned_answer, val_report = validate_and_clean_citations(raw_answer_out, retrieval.citations)
             else:
                 had_llm_error = True
@@ -581,8 +634,21 @@ class NexusSingleAgentAssistant:
         full_answer = ""
         llm_start = time.perf_counter()
 
+        context_to_use, abstain_msg = self._prepare_generation_context(
+            query,
+            retrieval,
+            filter_metadata=filter_metadata,
+            has_llm=bool(candidates),
+        )
+
         try:
-            if not candidates:
+            if abstain_msg is not None:
+                full_answer = abstain_msg
+                provider_used = "grounded_abstention"
+                model_used = "grounded-abstention-v1"
+                for start_i in range(0, len(full_answer), 48):
+                    yield {"event": "data", "data": {"delta": full_answer[start_i : start_i + 48]}}
+            elif not candidates:
                 full_answer = synthesize_extractive_grounded_answer(
                     query=query,
                     citations=retrieval.citations,
@@ -594,14 +660,9 @@ class NexusSingleAgentAssistant:
                 for start_i in range(0, len(full_answer), 48):
                     yield {"event": "data", "data": {"delta": full_answer[start_i : start_i + 48]}}
             else:
-                context_to_use = (
-                    retrieval.assembled_context
-                    if retrieval.has_sufficient_evidence
-                    else "No matching private workspace documents found for this query. Provide an extensive, clear, comprehensive, and developer-grade answer answering the user's doubt and question directly."
-                )
                 formatted_msgs = GROUNDED_PROMPT.format_messages(
                     conversation_history_block=history_block,
-                    assembled_context=context_to_use,
+                    assembled_context=context_to_use or "",
                     question=query,
                 )
                 sys_text = str(formatted_msgs[0].content)
@@ -613,15 +674,34 @@ class NexusSingleAgentAssistant:
                 for idx_cand, (cand_name, cand_llm) in enumerate(candidates):
                     try:
                         provider_used = cand_name
-                        model_used = (model if idx_cand == 0 else None) or getattr(cand_llm, "model_name", model_used)
-                        async for delta in cand_llm.stream(
-                            prompt=human_text,
-                            system_prompt=sys_text,
-                            temperature=0.1,
-                        ):
+                        req_model = model if idx_cand == 0 else None
+                        model_used = req_model or getattr(cand_llm, "model_name", model_used)
+                        if req_model:
+                            try:
+                                stream_iter = cand_llm.stream(  # type: ignore[call-arg]
+                                    prompt=human_text,
+                                    system_prompt=sys_text,
+                                    temperature=0.1,
+                                    model=req_model,
+                                )
+                            except TypeError:
+                                stream_iter = cand_llm.stream(
+                                    prompt=human_text,
+                                    system_prompt=sys_text,
+                                    temperature=0.1,
+                                )
+                        else:
+                            stream_iter = cand_llm.stream(
+                                prompt=human_text,
+                                system_prompt=sys_text,
+                                temperature=0.1,
+                            )
+                        async for delta in stream_iter:
                             full_answer += delta
                             yield {"event": "data", "data": {"delta": delta}}
                         if full_answer.strip():
+                            usage_obj = getattr(cand_llm, "last_usage", None)
+                            model_used = getattr(usage_obj, "model", None) or model_used
                             streamed_ok = True
                             break
                     except Exception as stream_exc:

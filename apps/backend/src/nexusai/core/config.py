@@ -36,7 +36,7 @@ class Settings(BaseSettings):
 
     # ── LLM / Embeddings ─────────────────────────────────────────
     GOOGLE_API_KEYS: str = ""
-    GEMINI_MODELS: str = "gemini-3.5-flash-lite,gemini-3.5-flash,gemini-3.1-flash-lite"
+    GEMINI_MODELS: str = "gemini-3.5-flash-lite,gemini-3.1-flash-lite,gemini-3.5-flash"
     DEFAULT_GEMINI_MODEL: str = "gemini-3.5-flash-lite"
     GROQ_API_KEYS: str = ""
     GROQ_MODELS: str = "openai/gpt-oss-120b,openai/gpt-oss-20b,qwen/qwen3.8-27b"
