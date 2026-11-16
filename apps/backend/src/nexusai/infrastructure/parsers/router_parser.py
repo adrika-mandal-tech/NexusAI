@@ -85,6 +85,11 @@ class StructuredTextParser(DocumentParserPort):
     @staticmethod
     def _read_text_sync(file_path: str) -> str:
         raw_bytes = Path(file_path).read_bytes()
+        if raw_bytes.startswith((b"\xff\xfe", b"\xfe\xff")):
+            try:
+                return raw_bytes.decode("utf-16")
+            except UnicodeDecodeError:
+                pass
         for enc in ("utf-8-sig", "utf-8", "latin-1"):
             try:
                 return raw_bytes.decode(enc)
@@ -107,16 +112,23 @@ class StructuredTextParser(DocumentParserPort):
                 reader = list(csv.reader(io.StringIO(raw_text)))
                 if len(reader) >= 2:
                     headers = [h.strip() or f"col_{i}" for i, h in enumerate(reader[0])]
+                    total_data_rows = len(reader) - 1
+                    row_cap = 500
                     lines = [
                         f"# CSV Table: {filename}",
+                        f"Total rows: {total_data_rows} | Columns ({len(headers)}): {', '.join(headers)}",
                         "",
                         "| " + " | ".join(headers) + " |",
                         "| " + " | ".join(["---"] * len(headers)) + " |",
                     ]
-                    for row in reader[1:5000]:
+                    for row in reader[1 : 1 + row_cap]:
                         padded = (row + [""] * len(headers))[: len(headers)]
                         escaped = [cell.replace("|", "\\|").replace("\n", " ").strip() for cell in padded]
                         lines.append("| " + " | ".join(escaped) + " |")
+                    if total_data_rows > row_cap:
+                        lines.append(
+                            f"\n_(Indexed first {row_cap} of {total_data_rows} rows for vector search; full statistical profiling and SQL/graph analytics remain available.)_"
+                        )
                     return "\n".join(lines)
             except Exception:
                 pass

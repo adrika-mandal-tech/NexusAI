@@ -7,6 +7,7 @@ Neo4j and link bi-directionally with Qdrant chunk payloads (`entity_ids`).
 
 from __future__ import annotations
 
+import asyncio
 import re
 from itertools import combinations
 from typing import Any
@@ -288,34 +289,52 @@ class HybridEntityExtractor:
         chunk_texts: list[str],
         use_llm: bool = True,
     ) -> list[dict[str, list[dict[str, Any]]]]:
-        """Extract canonicalized entities and relationships for a batch of chunks."""
+        """Extract canonicalized entities and relationships for a batch of chunks concurrently."""
         results: list[dict[str, list[dict[str, Any]]]] = []
         llm_ready = use_llm and self._llm_is_usable()
-        llm_calls = 0
+        eligible_indices: list[int] = []
 
-        for text in chunk_texts:
+        for idx, text in enumerate(chunk_texts):
             det = extract_entities_deterministic(text)
             merged_entities = {e["id"]: e for e in det["entities"]}
             merged_rels = {(r["source_id"], r["target_id"], r["type"]): r for r in det["relationships"]}
+            results.append({"_entities": merged_entities, "_rels": merged_rels})  # type: ignore[dict-item]
+            if llm_ready and len(eligible_indices) < self._max_llm_chunks and len(text.strip()) >= 80:
+                eligible_indices.append(idx)
 
-            if llm_ready and llm_calls < self._max_llm_chunks and len(text.strip()) >= 80:
-                llm_calls += 1
-                try:
-                    raw_llm = await self._llm.extract_entities(text)  # type: ignore[union-attr]
-                    canon = canonicalize_llm_extraction(raw_llm)
-                    for e in canon["entities"]:
-                        merged_entities[e["id"]] = e
-                    for r in canon["relationships"]:
-                        merged_rels[(r["source_id"], r["target_id"], r["type"])] = r
-                except Exception as exc:
-                    logger.debug("LLM entity enrichment skipped on chunk (%s); using deterministic entities", exc)
-                    llm_ready = False
+        if eligible_indices and self._llm is not None:
+            sem = asyncio.Semaphore(4)
 
-            results.append(
-                {
-                    "entities": list(merged_entities.values()),
-                    "relationships": list(merged_rels.values()),
-                }
-            )
-        return results
+            async def _enrich_one(chunk_idx: int) -> tuple[int, dict[str, Any] | None]:
+                async with sem:
+                    try:
+                        raw = await asyncio.wait_for(
+                            self._llm.extract_entities(chunk_texts[chunk_idx]),  # type: ignore[union-attr]
+                            timeout=12.0,
+                        )
+                        return chunk_idx, raw
+                    except Exception as exc:
+                        logger.debug("LLM entity enrichment skipped on chunk %d (%s); using deterministic entities", chunk_idx, exc)
+                        return chunk_idx, None
+
+            enriched = await asyncio.gather(*(_enrich_one(i) for i in eligible_indices))
+            for chunk_idx, raw_llm in enriched:
+                if not isinstance(raw_llm, dict):
+                    continue
+                canon = canonicalize_llm_extraction(raw_llm)
+                target = results[chunk_idx]
+                merged_entities = target["_entities"]  # type: ignore[index]
+                merged_rels = target["_rels"]  # type: ignore[index]
+                for e in canon["entities"]:
+                    merged_entities[e["id"]] = e
+                for r in canon["relationships"]:
+                    merged_rels[(r["source_id"], r["target_id"], r["type"])] = r
+
+        return [
+            {
+                "entities": list(item["_entities"].values()),  # type: ignore[attr-defined]
+                "relationships": list(item["_rels"].values()),  # type: ignore[attr-defined]
+            }
+            for item in results
+        ]
 

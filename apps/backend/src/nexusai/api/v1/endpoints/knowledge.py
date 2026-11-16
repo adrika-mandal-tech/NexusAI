@@ -56,9 +56,9 @@ FILE_SIZE_LIMITS: dict[str, int] = {
     "html": 20 * 1024 * 1024,
     "htm": 20 * 1024 * 1024,
     "csv": 100 * 1024 * 1024,
-    "txt": 10 * 1024 * 1024,
-    "md": 10 * 1024 * 1024,
-    "json": 10 * 1024 * 1024,
+    "txt": 25 * 1024 * 1024,
+    "md": 25 * 1024 * 1024,
+    "json": 25 * 1024 * 1024,
     "png": 25 * 1024 * 1024,
     "jpg": 25 * 1024 * 1024,
     "jpeg": 25 * 1024 * 1024,
@@ -127,18 +127,22 @@ async def process_single_upload(
     content_hash = compute_sha256_bytes(content)
     repo = get_knowledge_repo()
 
-    # Idempotent duplicate check: avoid uncontrolled duplicate indexing unless force_reindex=True
-    if not force_reindex and hasattr(repo, "find_source_by_hash"):
+    # Idempotent duplicate check: return existing READY source, or reuse failed/stale row on re-upload
+    existing_to_reuse = None
+    if hasattr(repo, "find_source_by_hash"):
         existing = await repo.find_source_by_hash(uid, content_hash)
-        if existing is not None and existing.status == SourceStatus.READY:
-            return {
-                "source_id": str(existing.id),
-                "document_id": str(existing.id),
-                "status": "ready",
-                "duplicate": True,
-                "chunks": existing.chunk_count,
-                "filename": existing.title,
-            }
+        if existing is not None:
+            if not force_reindex and existing.status == SourceStatus.READY:
+                return {
+                    "source_id": str(existing.id),
+                    "document_id": str(existing.id),
+                    "status": "ready",
+                    "duplicate": True,
+                    "chunks": existing.chunk_count,
+                    "filename": existing.title,
+                }
+            if existing.status == SourceStatus.FAILED or (not force_reindex and existing.status == SourceStatus.PENDING):
+                existing_to_reuse = existing
 
     storage_dir = _resolve_upload_storage_dir()
     staged_path = storage_dir / f"{content_hash[:16]}_{filename}"
@@ -155,21 +159,30 @@ async def process_single_upload(
         ) from exc
 
     mapped_type = SOURCE_TYPE_MAP.get(ext, source_type_hint if source_type_hint in SOURCE_TYPE_MAP.values() else "txt")
+    new_meta = {
+        "filename": filename,
+        "size": len(content),
+        "content_type": file.content_type,
+        "content_hash": content_hash,
+        "stored_path": str(staged_path),
+        "recommended_parser": inspection.recommended_parser,
+        "page_count": inspection.page_count,
+    }
 
-    source = await service.create_source(
-        user_id=uid,
-        title=filename,
-        source_type=mapped_type,
-        metadata={
-            "filename": filename,
-            "size": len(content),
-            "content_type": file.content_type,
-            "content_hash": content_hash,
-            "stored_path": str(staged_path),
-            "recommended_parser": inspection.recommended_parser,
-            "page_count": inspection.page_count,
-        },
-    )
+    if existing_to_reuse is not None:
+        existing_to_reuse.title = filename
+        existing_to_reuse.status = SourceStatus.PENDING
+        existing_to_reuse.error_message = None
+        existing_to_reuse.chunk_count = 0
+        existing_to_reuse.metadata = new_meta
+        source = await repo.update_source(existing_to_reuse)
+    else:
+        source = await service.create_source(
+            user_id=uid,
+            title=filename,
+            source_type=mapped_type,
+            metadata=new_meta,
+        )
 
     dispatch_info = await dispatch_document_ingestion(
         source_id=source.id,

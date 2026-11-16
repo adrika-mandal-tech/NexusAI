@@ -166,6 +166,7 @@ export default function SettingsPage() {
                   onChange={(e) => setForm({ ...form, LLM_PROVIDER: e.target.value })}
                   className="w-full rounded-lg border border-border bg-background px-2.5 py-2"
                 >
+                  <option value="auto">auto (Gemini &rarr; Groq &rarr; OpenLM)</option>
                   <option value="gemini">gemini</option>
                   <option value="openlm">openlm</option>
                   <option value="groq">groq</option>

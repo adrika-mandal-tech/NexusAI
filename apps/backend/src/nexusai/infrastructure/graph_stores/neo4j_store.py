@@ -414,7 +414,8 @@ class Neo4jGraphStore(GraphStorePort):
                 }
             )
 
-        await self.run_write(query, {"chunks": chunk_data})
+        for start in range(0, len(chunk_data), 200):
+            await self.run_write(query, {"chunks": chunk_data[start : start + 200]})
         logger.info("Created %d Chunk nodes in Neo4j", len(chunks))
 
     async def create_entities_and_relationships(
@@ -494,7 +495,8 @@ class Neo4jGraphStore(GraphStorePort):
             MATCH (c:Chunk {id: row.chunk_id})
             MERGE (c)-[:HAS_ENTITY]->(e)
             """
-            await self.run_write(entity_query, {"document_id": doc_id_str, "rows": entity_rows})
+            for start in range(0, len(entity_rows), 400):
+                await self.run_write(entity_query, {"document_id": doc_id_str, "rows": entity_rows[start : start + 400]})
 
             # Apply validated secondary Neo4j domain labels (e.g. :Technology, :Database, :Algorithm)
             by_sublabel: dict[str, list[str]] = {}
@@ -517,7 +519,8 @@ class Neo4jGraphStore(GraphStorePort):
             SET r.document_id = coalesce(r.document_id, $document_id),
                 r.updated_at = datetime()
             """
-            await self.run_write(rel_query, {"document_id": doc_id_str, "rows": rel_rows})
+            for start in range(0, len(rel_rows), 400):
+                await self.run_write(rel_query, {"document_id": doc_id_str, "rows": rel_rows[start : start + 400]})
 
     async def get_chunk_entities(self, chunk_ids: list[UUID]) -> list[dict[str, Any]]:
         """Get entities connected to the given chunk IDs (1-hop expansion) with accurate relationship labels."""

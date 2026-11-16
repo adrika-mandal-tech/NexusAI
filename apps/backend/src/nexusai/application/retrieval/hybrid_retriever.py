@@ -1137,6 +1137,12 @@ class HybridRetrievalEngine:
             d_score = float(ch.get("dense_score") or 0.0)
             bm25_sc = float(ch.get("bm25_score") or ch.get("sparse_score") or 0.0)
             has_graph = ch.get("graph_rank") is not None
+            is_graph_only = (
+                has_graph
+                and ch.get("dense_rank") is None
+                and ch.get("sparse_rank") is None
+                and d_score == 0.0
+            )
 
             ch_model = str(ch.get("embedding_model") or (ch.get("metadata") or {}).get("embedding_model") or "").lower()
             eff_pure_floor = 0.56 if ("bge-m3" in ch_model or is_bge) else pure_dense_floor
@@ -1150,14 +1156,22 @@ class HybridRetrievalEngine:
             )
             overlap_tokens = active_q_tokens & doc_tokens
             lexical_overlap = len(overlap_tokens) >= 1
+            overlap_ratio = len(overlap_tokens) / max(1, len(active_q_tokens))
+            strong_graph_overlap = (
+                len(overlap_tokens) >= min(2, len(active_q_tokens))
+                and overlap_ratio >= 0.34
+            )
 
-            # Graph-only candidates MUST still share at least one specific query token (or run in explicit graph mode)
-            # to prevent unrelated CSV/KG nodes (e.g. suppliers.csv) from polluting document chat.
+            # Graph-only candidates (`dense_rank` and `sparse_rank` absent) MUST match multiple specific query
+            # terms (or run in explicit `graph` mode) even if reranker assigned a post-fusion BM25 score.
             if effective_mode == "graph" and has_graph:
                 filtered.append(ch)
+            elif is_graph_only:
+                if strong_graph_overlap:
+                    filtered.append(ch)
             elif d_score >= eff_pure_floor:
                 filtered.append(ch)
-            elif lexical_overlap and (d_score >= lexical_dense_floor or bm25_sc > 0.0 or has_graph):
+            elif lexical_overlap and (d_score >= lexical_dense_floor or bm25_sc > 0.0):
                 filtered.append(ch)
         return filtered
 

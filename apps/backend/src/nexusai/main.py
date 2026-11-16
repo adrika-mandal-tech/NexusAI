@@ -55,6 +55,22 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     try:
         await init_db()
         logger.info("Database initialized")
+        # Recover any sources left stuck in PROCESSING from a prior crash/restart
+        from sqlalchemy import update
+
+        from nexusai.infrastructure.db.models import IngestionSource as SourceModel
+        from nexusai.infrastructure.db.models import SourceStatus as DBSourceStatus
+        from nexusai.infrastructure.db.session import get_session
+
+        async with get_session() as db_sess:
+            await db_sess.execute(
+                update(SourceModel)
+                .where(SourceModel.status == DBSourceStatus.PROCESSING)
+                .values(
+                    status=DBSourceStatus.FAILED,
+                    error_message="Interrupted by server restart; click Re-index or re-upload to retry.",
+                )
+            )
     except Exception as exc:
         logger.warning("Database init skipped: %s", exc)
     yield

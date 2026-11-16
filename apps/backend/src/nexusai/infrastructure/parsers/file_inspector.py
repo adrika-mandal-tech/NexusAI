@@ -35,7 +35,7 @@ DOCUMENT_TYPE_MAX_BYTES: dict[str, int] = {
     ".docx": 50 * 1024 * 1024,   # 50 MB
     ".doc": 50 * 1024 * 1024,    # 50 MB
     ".pptx": 50 * 1024 * 1024,   # 50 MB
-    ".xlsx": 50 * 1024 * 1024,   # 50 MB
+    ".xlsx": 100 * 1024 * 1024,  # 100 MB
     ".html": 25 * 1024 * 1024,   # 25 MB
     ".htm": 25 * 1024 * 1024,    # 25 MB
     ".txt": 25 * 1024 * 1024,    # 25 MB
@@ -180,7 +180,8 @@ def validate_and_inspect_file(
             )
 
     if ext in TEXT_EXTENSIONS:
-        if header.startswith(b"PK\x03\x04") or b"\x00" in header:
+        is_utf16_bom = header.startswith((b"\xff\xfe", b"\xfe\xff"))
+        if header.startswith(b"PK\x03\x04") or (b"\x00" in header and not is_utf16_bom):
             raise FileValidationError(
                 f"Text file '{display_name}' contains binary or compressed archive bytes."
             )
